@@ -1,95 +1,71 @@
 package main
 
-import (
-	"fmt"
-)
+import "fmt"
 
-const minThreshold = 10
-const maxThreshold = 20
-const maxItemSize = 6
+const targetThreshold = 40
 
-func arrayExample() {
-	sp := NewBasicSegmentProvider()
-	aa := NewArray(sp)
-	fmt.Println("append to loc 0")
-	aa.AppendByteArrayItem(1)
-	aa.Print()
-	fmt.Println("append to loc 1")
-	aa.AppendByteArrayItem(2)
-	aa.Print()
-	fmt.Println("replace loc 0")
-	aa.Insert(ByteArrayItem{uint32(1), byte(4)}) // index is 1
-	aa.Print()
-	fmt.Println("append to loc 2")
-	aa.AppendByteArrayItem(5)
-	aa.Print()
-	fmt.Println("append to loc 3")
-	aa.AppendByteArrayItem(7)
-	aa.Print()
-	fmt.Println("append to loc 4 and split")
-	aa.AppendByteArrayItem(9)
-	aa.Print()
-	fmt.Println("replace loc 2")
-	aa.Insert(ByteArrayItem{uint32(3), byte(0)}) // index is 3
-	aa.Print()
-	fmt.Println("replace loc 4")
-	aa.Insert(ByteArrayItem{uint32(5), byte(0)})
-	aa.Print()
-	fmt.Println("remove item at loc 3, and merge")
-	aa.Remove(4) // index 2
-	aa.Print()
-	fmt.Println("no op")
-	aa.Remove(4)
-	aa.Print()
-	fmt.Println("add item to index 4 (loc 3) and split")
-	aa.Insert(ByteArrayItem{uint32(4), byte(5)})
-	aa.Print()
-	fmt.Println(aa.ValidateCorrectness([]byte{4, 2, 0, 5, 0}))
-	fmt.Println("remove several")
-	aa.Remove(1)
-	aa.Remove(2)
-	aa.Remove(3)
-	aa.Print()
-	fmt.Println("remove rest")
-	aa.Remove(4)
-	aa.Remove(5)
-	aa.Print()
-	fmt.Println("add some values")
-	aa.Insert(ByteArrayItem{uint32(2), byte(2)})
-	aa.Insert(ByteArrayItem{uint32(4), byte(4)})
-	aa.Insert(ByteArrayItem{uint32(6), byte(6)})
-	aa.Insert(ByteArrayItem{uint32(8), byte(8)})
-	aa.Insert(ByteArrayItem{uint32(10), byte(10)})
-	aa.Print()
-	arrayID := aa.metaSegmentID
-	bb := FetchArray(arrayID, sp)
-	bb.Print()
+const minThreshold = targetThreshold / 4   // 10
+const maxThreshold = targetThreshold * 1.5 // 60
+//const maxItemSize = 6
+
+func newArrayExample() {
+
+	// Create ArrayValue with Values
+	values := make([]Value, 10)
+	for i := 0; i < len(values); i++ {
+		values[i] = UInt32Value(i)
+	}
+
+	fmt.Printf("Create ArrayValue with cadence values %v\n", values)
+	array := NewArrayValue(values)
+
+	// Print underlying slab layout
+	array.metaSlab.Print()
+
+	verifyArrayElements(array, values)
+
+	data, err := array.GetSerizable().Encode()
+	if err != nil {
+		fmt.Printf("Encode error %v\n", err)
+		return
+	}
+
+	//fmt.Printf("encoded data 0x%x\n", data)
+
+	fmt.Printf("Recreate ArrayValue with encoded data\n")
+
+	// Reconstruct array using encoded data
+	array2, err := NewArrayValueFromEncodedData(data)
+	if err != nil {
+		fmt.Printf("NewArrayValueFromEncodedData(0x%x) error %v\n", data, err)
+		return
+	}
+
+	array2.metaSlab.Print()
+
+	verifyArrayElements(array2, values)
 }
 
-func mapExample() {
-	sp := NewBasicSegmentProvider()
-	mm := NewMap(sp)
-	mm.Insert(StringMapItem{"A", "AAAA"})
-	mm.Print()
-	mm.Insert(StringMapItem{"B", "BBB"})
-	mm.Print()
-	mm.Insert(StringMapItem{"D", "DDDD"})
-	mm.Print()
-	mm.Insert(StringMapItem{"A", "AAAAA"})
-	mm.Print()
-	mm.Insert(StringMapItem{"C", "CC"})
-	mm.Print()
-	mm.Insert(StringMapItem{"F", "FFFF"})
-	mm.Print()
-	fmt.Println(mm.Get("H"))
-	fmt.Println(mm.Get("A"))
-	mm.Remove("D")
-	mm.Print()
+func verifyArrayElements(array *ArrayValue, values []Value) {
+	if array.Size() != len(values) {
+		fmt.Printf("wrong number of elements, got %d, want %d", array.Size(), len(values))
+		return
+	}
+
+	// Get and verify each element
+	for i := 0; i < array.Size(); i++ {
+		v, err := array.Get(uint32(i))
+		if err != nil {
+			fmt.Printf("array.Get(%d) error %v\n", i, err)
+		}
+		if v != values[i] {
+			fmt.Printf("array.Get(%d) returned %[1]v (%[1]T), want %[2]v (%[2]T)\n", i, v, values[i])
+		}
+	}
 }
 
 func main() {
-	// arrayExample()
-	mapExample()
+	newArrayExample()
 }
 
 // TODO add equal functionaity to create a list of values and compare it to an array

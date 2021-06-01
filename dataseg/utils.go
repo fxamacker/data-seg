@@ -2,9 +2,16 @@ package main
 
 var counter int = 0
 
-func generateUUID() SegmentID {
+func generateUUID() StorageID {
 	counter++
-	return SegmentID(counter)
+	return StorageID(counter)
+}
+
+var storageIDCounter uint32 = 0
+
+func generateStorageID() StorageID {
+	storageIDCounter++
+	return StorageID(storageIDCounter)
 }
 
 // Bit returns the bit at index `idx` in the byte array `b` (big endian)
