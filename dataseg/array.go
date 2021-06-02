@@ -7,16 +7,14 @@ import (
 	"math"
 )
 
-type Index uint32
-
 type ArraySlabHeader struct {
 	id    StorageID
 	slab  *ArraySlab // remove this when switching to SlabStorage
-	count int        // number of elements in ArraySlab
+	count uint32     // number of elements in ArraySlab
 	size  uint32     // sum of all element size + array header size
 }
 
-// ArraySlab implements Serializable interface
+// ArraySlab implements Slab interface
 type ArraySlab struct {
 	header   *ArraySlabHeader
 	elements []Serializable
@@ -24,7 +22,7 @@ type ArraySlab struct {
 
 type ArrayMetaSlab struct {
 	id             StorageID
-	orderedHeaders []*ArraySlabHeader
+	orderedHeaders []*ArraySlabHeader // TODO: orderedHeaders can be a linked list
 	v              *ArrayValue
 }
 
@@ -64,6 +62,12 @@ func (a *ArraySlab) headerSize() uint32 {
 }
 
 func (a *ArraySlab) Split() *ArraySlab {
+
+	if len(a.elements) == 1 {
+		// Can't split array with one element
+		return nil
+	}
+
 	// this compute the ceil of split keep the first part with more members (optimized for append operations)
 	size := a.header.size
 	d := float64(size) / float64(2)
@@ -79,10 +83,15 @@ func (a *ArraySlab) Split() *ArraySlab {
 		}
 	}
 
+	if newSlabStartIndex == len(a.elements) {
+		// Split last element from the rest of elements
+		newSlabStartIndex = len(a.elements) - 1
+		slab1Size = a.header.size - a.elements[len(a.elements)-1].ByteSize()
+	}
+
 	newSlabHeader := &ArraySlabHeader{
-		id: generateStorageID(),
-		//startIndex: a.header.startIndex + uint32(newSlabStartIndex),
-		count: a.header.count - newSlabStartIndex,
+		id:    generateStorageID(),
+		count: a.header.count - uint32(newSlabStartIndex),
 		size:  a.header.size - slab1Size + a.headerSize(),
 	}
 	newSlab := &ArraySlab{
@@ -93,7 +102,7 @@ func (a *ArraySlab) Split() *ArraySlab {
 
 	a.elements = a.elements[:newSlabStartIndex]
 	a.header.size = slab1Size
-	a.header.count = newSlabStartIndex
+	a.header.count = uint32(newSlabStartIndex)
 
 	return newSlab
 }
@@ -101,6 +110,7 @@ func (a *ArraySlab) Split() *ArraySlab {
 func (a *ArraySlab) Merge(slab2 *ArraySlab) {
 	a.elements = append(a.elements, slab2.elements...)
 	a.header.size += slab2.header.size
+	a.header.count += slab2.header.count
 }
 
 func (a *ArraySlab) ID() StorageID {
@@ -129,7 +139,7 @@ func (a *ArraySlab) Encode() ([]byte, error) {
 
 func (a *ArraySlab) Decode(data []byte) error {
 
-	if len(data) < 5 {
+	if len(data) < int(a.headerSize()) {
 		return errors.New("wrong byte size for array slab")
 	}
 	if data[0] != 0x80|byte(26) {
@@ -164,18 +174,29 @@ func (a *ArrayMetaSlab) ID() StorageID {
 	return a.id
 }
 
+func (a *ArrayMetaSlab) GetCount() uint32 {
+	count := uint32(0)
+	for _, header := range a.orderedHeaders {
+		count += header.count
+	}
+	return count
+}
+
 func (a *ArrayMetaSlab) Encode() ([]byte, error) {
-	headerSize := 4 + len(a.orderedHeaders)*8
+	headerSize := 8 + len(a.orderedHeaders)*8
 
 	buf := make([]byte, headerSize)
 
+	// Write metaslab id (4 bytes)
+	binary.BigEndian.PutUint32(buf, uint32(a.id))
+
 	// Write number of slabs (4 bytes)
-	binary.BigEndian.PutUint32(buf, uint32(len(a.orderedHeaders)))
+	binary.BigEndian.PutUint32(buf[4:], uint32(len(a.orderedHeaders)))
 
 	// For each slab, write slab id (4 bytes) and slab size (4 bytes)
 	for i, header := range a.orderedHeaders {
-		binary.BigEndian.PutUint32(buf[4+i*8:], uint32(header.id))
-		binary.BigEndian.PutUint32(buf[4+i*8+4:], uint32(header.size))
+		binary.BigEndian.PutUint32(buf[8+i*8:], uint32(header.id))
+		binary.BigEndian.PutUint32(buf[8+i*8+4:], uint32(header.size))
 	}
 
 	for _, header := range a.orderedHeaders {
@@ -189,27 +210,21 @@ func (a *ArrayMetaSlab) Encode() ([]byte, error) {
 	return buf, nil
 }
 
-func (a *ArrayMetaSlab) GetCount() int {
-	count := 0
-	for _, header := range a.orderedHeaders {
-		count += header.count
-	}
-	return count
-}
-
 func (a *ArrayMetaSlab) Decode(data []byte) error {
-	if len(data) < 4 {
+	if len(data) < 8 {
 		return errors.New("too short for array meta slab")
 	}
 
-	slabCount := binary.BigEndian.Uint32(data[:4])
+	a.id = StorageID(binary.BigEndian.Uint32(data[:4]))
+
+	slabCount := binary.BigEndian.Uint32(data[4:])
 	if slabCount == 0 {
 		return nil
 	}
 
 	slabData := make([][2]uint32, slabCount)
 
-	index := 4
+	index := 8
 	for i := 0; i < int(slabCount); i++ {
 		id := binary.BigEndian.Uint32(data[index:])
 		size := binary.BigEndian.Uint32(data[index+4:])
@@ -233,8 +248,7 @@ func (a *ArrayMetaSlab) Decode(data []byte) error {
 
 		slab.header.slab = slab
 		slab.header.size = sd[1]
-		//slab.header.startIndex = startIndex
-		slab.header.count = len(slab.elements)
+		slab.header.count = uint32(len(slab.elements))
 
 		a.orderedHeaders = append(a.orderedHeaders, slab.header)
 	}
@@ -244,7 +258,7 @@ func (a *ArrayMetaSlab) Decode(data []byte) error {
 
 func (a *ArrayMetaSlab) ByteSize() uint32 {
 	var size uint32
-	size = uint32(4) + uint32(len(a.orderedHeaders))*8
+	size = uint32(8) + uint32(len(a.orderedHeaders))*8
 	for _, header := range a.orderedHeaders {
 		size += header.size
 	}
@@ -292,10 +306,12 @@ func (a *ArrayMetaSlab) Append(v Serializable) error {
 
 func (a *ArrayMetaSlab) Remove(index uint32) error {
 	foundHeadIndex := -1
+	slabIndex := uint32(0)
 	startIndex := uint32(0)
 	for i, h := range a.orderedHeaders {
 		if index >= startIndex && index < startIndex+uint32(h.count) {
 			foundHeadIndex = i
+			slabIndex = index - startIndex
 			break
 		}
 		startIndex += uint32(h.count)
@@ -306,7 +322,7 @@ func (a *ArrayMetaSlab) Remove(index uint32) error {
 	}
 
 	slab := a.orderedHeaders[foundHeadIndex].slab
-	err := slab.Remove(index)
+	err := slab.Remove(slabIndex)
 	if err != nil {
 		return err
 	}
@@ -391,6 +407,9 @@ func (a *ArrayMetaSlab) merge(headerIndex int) error {
 func (a *ArrayMetaSlab) split(headerIndex int) error {
 	slab := a.orderedHeaders[headerIndex].slab
 	newSlab := slab.Split()
+	if newSlab == nil {
+		return nil
+	}
 
 	a.orderedHeaders = append(a.orderedHeaders, nil)
 	copy(a.orderedHeaders[headerIndex+2:], a.orderedHeaders[headerIndex+1:])
@@ -409,5 +428,5 @@ func (a *ArrayMetaSlab) Print() {
 		}
 		fmt.Printf("]\n")
 	}
-	fmt.Println("====================================")
+	fmt.Println("==========================================")
 }

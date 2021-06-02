@@ -60,7 +60,7 @@ func (v *ArrayValue) GetSerizable() Serializable {
 	return v.metaSlab
 }
 
-func (v *ArrayValue) Size() int {
+func (v *ArrayValue) Size() uint32 {
 	return v.metaSlab.GetCount()
 }
 
