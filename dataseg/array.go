@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/list"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -22,7 +23,7 @@ type ArraySlab struct {
 
 type ArrayMetaSlab struct {
 	id             StorageID
-	orderedHeaders []*ArraySlabHeader // TODO: orderedHeaders can be a linked list
+	orderedHeaders list.List
 	v              *ArrayValue
 }
 
@@ -174,16 +175,18 @@ func (a *ArrayMetaSlab) ID() StorageID {
 	return a.id
 }
 
+// TODO: count can be cached
 func (a *ArrayMetaSlab) GetCount() uint32 {
 	count := uint32(0)
-	for _, header := range a.orderedHeaders {
+	for e := a.orderedHeaders.Front(); e != nil; e = e.Next() {
+		header := e.Value.(*ArraySlabHeader)
 		count += header.count
 	}
 	return count
 }
 
 func (a *ArrayMetaSlab) Encode() ([]byte, error) {
-	headerSize := 8 + len(a.orderedHeaders)*8
+	headerSize := 8 + a.orderedHeaders.Len()*8
 
 	buf := make([]byte, headerSize)
 
@@ -191,15 +194,19 @@ func (a *ArrayMetaSlab) Encode() ([]byte, error) {
 	binary.BigEndian.PutUint32(buf, uint32(a.id))
 
 	// Write number of slabs (4 bytes)
-	binary.BigEndian.PutUint32(buf[4:], uint32(len(a.orderedHeaders)))
+	binary.BigEndian.PutUint32(buf[4:], uint32(a.orderedHeaders.Len()))
 
 	// For each slab, write slab id (4 bytes) and slab size (4 bytes)
-	for i, header := range a.orderedHeaders {
+	i := 0
+	for e := a.orderedHeaders.Front(); e != nil; e = e.Next() {
+		header := e.Value.(*ArraySlabHeader)
 		binary.BigEndian.PutUint32(buf[8+i*8:], uint32(header.id))
 		binary.BigEndian.PutUint32(buf[8+i*8+4:], uint32(header.size))
+		i++
 	}
 
-	for _, header := range a.orderedHeaders {
+	for e := a.orderedHeaders.Front(); e != nil; e = e.Next() {
+		header := e.Value.(*ArraySlabHeader)
 		b, err := header.slab.Encode()
 		if err != nil {
 			return nil, err
@@ -250,7 +257,7 @@ func (a *ArrayMetaSlab) Decode(data []byte) error {
 		slab.header.size = sd[1]
 		slab.header.count = uint32(len(slab.elements))
 
-		a.orderedHeaders = append(a.orderedHeaders, slab.header)
+		a.orderedHeaders.PushBack(slab.header)
 	}
 
 	return nil
@@ -258,20 +265,22 @@ func (a *ArrayMetaSlab) Decode(data []byte) error {
 
 func (a *ArrayMetaSlab) ByteSize() uint32 {
 	var size uint32
-	size = uint32(8) + uint32(len(a.orderedHeaders))*8
-	for _, header := range a.orderedHeaders {
+	size = uint32(8) + uint32(a.orderedHeaders.Len())*8
+	for e := a.orderedHeaders.Front(); e != nil; e = e.Next() {
+		header := e.Value.(*ArraySlabHeader)
 		size += header.size
 	}
 	return size
 }
 
 func (a *ArrayMetaSlab) Get(index uint32) (Serializable, error) {
-	if len(a.orderedHeaders) == 0 {
+	if a.orderedHeaders.Len() == 0 {
 		return nil, fmt.Errorf("out of bounds")
 	}
 
 	startIndex := uint32(0)
-	for _, h := range a.orderedHeaders {
+	for e := a.orderedHeaders.Front(); e != nil; e = e.Next() {
+		h := e.Value.(*ArraySlabHeader)
 		if index >= startIndex && index < startIndex+uint32(h.count) {
 			return h.slab.Get(index - startIndex)
 		}
@@ -282,11 +291,14 @@ func (a *ArrayMetaSlab) Get(index uint32) (Serializable, error) {
 }
 
 func (a *ArrayMetaSlab) Append(v Serializable) error {
+	lastHeader := a.orderedHeaders.Back()
+
 	// Create new slab if
 	// - there isn't any slab, or
 	// - last slab size will exceed maxThreshold with new element
-	if len(a.orderedHeaders) == 0 ||
-		a.orderedHeaders[len(a.orderedHeaders)-1].size+v.ByteSize() > maxThreshold {
+
+	if lastHeader == nil ||
+		lastHeader.Value.(*ArraySlabHeader).size+v.ByteSize() > maxThreshold {
 
 		header := &ArraySlabHeader{id: generateStorageID()}
 
@@ -295,132 +307,144 @@ func (a *ArrayMetaSlab) Append(v Serializable) error {
 		header.slab = slab
 		header.size = slab.headerSize()
 
-		a.orderedHeaders = append(a.orderedHeaders, slab.header)
+		a.orderedHeaders.PushBack(slab.header)
 
 		return slab.Append(v)
 	}
 
-	lastSlab := a.orderedHeaders[len(a.orderedHeaders)-1].slab
+	lastSlab := lastHeader.Value.(*ArraySlabHeader).slab
 	return lastSlab.Append(v)
 }
 
 func (a *ArrayMetaSlab) Remove(index uint32) error {
-	foundHeadIndex := -1
 	slabIndex := uint32(0)
 	startIndex := uint32(0)
-	for i, h := range a.orderedHeaders {
+	var headerElement *list.Element
+
+	for e := a.orderedHeaders.Front(); e != nil; e = e.Next() {
+		h := e.Value.(*ArraySlabHeader)
 		if index >= startIndex && index < startIndex+uint32(h.count) {
-			foundHeadIndex = i
+			headerElement = e
 			slabIndex = index - startIndex
 			break
 		}
 		startIndex += uint32(h.count)
 	}
 
-	if foundHeadIndex < 0 {
+	if headerElement == nil {
 		return fmt.Errorf("out of bounds")
 	}
 
-	slab := a.orderedHeaders[foundHeadIndex].slab
+	slab := headerElement.Value.(*ArraySlabHeader).slab
 	err := slab.Remove(slabIndex)
 	if err != nil {
 		return err
 	}
 
 	if slab.header.size < minThreshold {
-		return a.merge(foundHeadIndex)
+		return a.merge(headerElement)
 	}
 
 	return nil
 }
 
-func (a *ArrayMetaSlab) merge(headerIndex int) error {
-	if len(a.orderedHeaders) == 1 {
+func (a *ArrayMetaSlab) merge(headerElement *list.Element) error {
+
+	if a.orderedHeaders.Len() == 1 {
 		return nil
 	}
 
-	if headerIndex == 0 {
+	header := headerElement.Value.(*ArraySlabHeader)
+	slab := header.slab
 
-		// first slab merges with next slab
-		nextSlab := a.orderedHeaders[headerIndex+1].slab
-		a.orderedHeaders[headerIndex].slab.Merge(nextSlab)
+	if headerElement.Prev() == nil {
 
-		// remove merged slab header
-		copy(a.orderedHeaders[headerIndex+1:], a.orderedHeaders[headerIndex+2:])
-		a.orderedHeaders = a.orderedHeaders[:len(a.orderedHeaders)-1]
+		// First slab merges with next slab
+		nextHeaderElement := headerElement.Next()
+		nextSlab := nextHeaderElement.Value.(*ArraySlabHeader).slab
 
-		if a.orderedHeaders[headerIndex].size > maxThreshold {
-			return a.split(headerIndex)
+		// Merge with next slab
+		slab.Merge(nextSlab)
+
+		// Remove merged slab header
+		a.orderedHeaders.Remove(nextHeaderElement)
+
+		if header.size > maxThreshold {
+			return a.split(headerElement)
 		}
 
 		return nil
 	}
 
-	if headerIndex == len(a.orderedHeaders)-1 {
+	if headerElement.Next() == nil {
 
-		// last slab merges with prev slab
-		prevSlab := a.orderedHeaders[headerIndex-1].slab
-		prevSlab.Merge(a.orderedHeaders[headerIndex].slab)
+		// Last slab merges with prev slab
+		prevHeaderElement := headerElement.Prev()
+		prevSlab := prevHeaderElement.Value.(*ArraySlabHeader).slab
 
-		// remove merged (last) slab header
-		a.orderedHeaders = a.orderedHeaders[:len(a.orderedHeaders)-1]
+		prevSlab.Merge(slab)
 
-		if a.orderedHeaders[len(a.orderedHeaders)-1].size > maxThreshold {
-			return a.split(len(a.orderedHeaders) - 1)
+		// Remove merged (last) slab header
+		a.orderedHeaders.Remove(headerElement)
+
+		if prevSlab.header.size > maxThreshold {
+			return a.split(prevHeaderElement)
 		}
 
 		return nil
 	}
 
-	prevHeader := a.orderedHeaders[headerIndex-1]
-	nextHeader := a.orderedHeaders[headerIndex+1]
+	prevHeaderElement := headerElement.Prev()
+	prevHeader := prevHeaderElement.Value.(*ArraySlabHeader)
+
+	nextHeaderElement := headerElement.Next()
+	nextHeader := nextHeaderElement.Value.(*ArraySlabHeader)
 
 	if prevHeader.size <= nextHeader.size {
 		// Merge with previous slab
-		prevHeader.slab.Merge(a.orderedHeaders[headerIndex].slab)
+		prevHeader.slab.Merge(slab)
 
 		// remove merged slab header
-		copy(a.orderedHeaders[headerIndex:], a.orderedHeaders[headerIndex+1:])
-		a.orderedHeaders = a.orderedHeaders[:len(a.orderedHeaders)-1]
+		a.orderedHeaders.Remove(headerElement)
 
 		if prevHeader.size > maxThreshold {
-			return a.split(headerIndex - 1)
+			return a.split(prevHeaderElement)
 		}
 		return nil
 
 	} else {
 
 		// Merge with next slab
-		a.orderedHeaders[headerIndex].slab.Merge(nextHeader.slab)
+		slab.Merge(nextHeader.slab)
 
-		// remove merged slab header
-		copy(a.orderedHeaders[headerIndex+1:], a.orderedHeaders[headerIndex+2:])
-		a.orderedHeaders = a.orderedHeaders[:len(a.orderedHeaders)-1]
+		// Remove merged slab header
+		a.orderedHeaders.Remove(nextHeaderElement)
 
-		if a.orderedHeaders[headerIndex].size > maxThreshold {
-			return a.split(headerIndex)
+		if header.size > maxThreshold {
+			return a.split(headerElement)
 		}
 		return nil
 	}
 }
 
-func (a *ArrayMetaSlab) split(headerIndex int) error {
-	slab := a.orderedHeaders[headerIndex].slab
-	newSlab := slab.Split()
+func (a *ArrayMetaSlab) split(headerElement *list.Element) error {
+	header := headerElement.Value.(*ArraySlabHeader)
+
+	newSlab := header.slab.Split()
 	if newSlab == nil {
 		return nil
 	}
 
-	a.orderedHeaders = append(a.orderedHeaders, nil)
-	copy(a.orderedHeaders[headerIndex+2:], a.orderedHeaders[headerIndex+1:])
-	a.orderedHeaders[headerIndex+1] = newSlab.header
+	a.orderedHeaders.InsertAfter(newSlab.header, headerElement)
 	return nil
 }
 
 // Print is intended for debugging purpose only
 func (a *ArrayMetaSlab) Print() {
 	fmt.Println("============= array slabs ================")
-	for i, h := range a.orderedHeaders {
+	i := 0
+	for e := a.orderedHeaders.Front(); e != nil; e = e.Next() {
+		h := e.Value.(*ArraySlabHeader)
 		fmt.Printf("slab %d, id %d, count %d, size %d\n", i, h.id, h.count, h.size)
 		fmt.Printf("[")
 		for _, e := range h.slab.elements {
