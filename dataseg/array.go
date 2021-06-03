@@ -58,15 +58,47 @@ func (a *ArraySlab) Remove(index uint32) error {
 	return nil
 }
 
+func (a *ArraySlab) Insert(index uint32, v Serializable) error {
+	if index >= uint32(len(a.elements)) {
+		return fmt.Errorf("out of bounds")
+	}
+
+	// Update elements
+	a.elements = append(a.elements, nil)
+	copy(a.elements[index+1:], a.elements[index:])
+	a.elements[index] = v
+
+	// Update header
+	a.header.size += v.ByteSize()
+	a.header.count++
+	return nil
+}
+
+func (a *ArraySlab) Set(index uint32, v Serializable) error {
+	if index >= uint32(len(a.elements)) {
+		return fmt.Errorf("out of bounds")
+	}
+
+	oldSize := a.elements[index].ByteSize()
+
+	// Update elements
+	a.elements[index] = v
+
+	// Update header
+	a.header.size = a.header.size - oldSize + v.ByteSize()
+
+	return nil
+}
+
 func (a *ArraySlab) headerSize() uint32 {
 	return 5
 }
 
-func (a *ArraySlab) Split() *ArraySlab {
+func (a *ArraySlab) Split() (*ArraySlab, error) {
 
 	if len(a.elements) == 1 {
 		// Can't split array with one element
-		return nil
+		return nil, nil
 	}
 
 	// this compute the ceil of split keep the first part with more members (optimized for append operations)
@@ -105,13 +137,14 @@ func (a *ArraySlab) Split() *ArraySlab {
 	a.header.size = slab1Size
 	a.header.count = uint32(newSlabStartIndex)
 
-	return newSlab
+	return newSlab, nil
 }
 
-func (a *ArraySlab) Merge(slab2 *ArraySlab) {
+func (a *ArraySlab) Merge(slab2 *ArraySlab) error {
 	a.elements = append(a.elements, slab2.elements...)
 	a.header.size += slab2.header.size
 	a.header.count += slab2.header.count
+	return nil
 }
 
 func (a *ArraySlab) ID() StorageID {
@@ -127,7 +160,9 @@ func (a *ArraySlab) Encode() ([]byte, error) {
 
 	index := 5
 	for _, e := range a.elements {
-		b, err := e.Encode()
+		var b []byte
+		var err error
+		b, err = e.Encode()
 		if err != nil {
 			return nil, err
 		}
@@ -170,6 +205,8 @@ func (a *ArraySlab) ByteSize() uint32 {
 func (a *ArrayMetaSlab) GetValue() Value {
 	return a.v
 }
+
+func (a *ArrayMetaSlab) IsConstantSized() bool { return false }
 
 func (a *ArrayMetaSlab) ID() StorageID {
 	return a.id
@@ -348,6 +385,46 @@ func (a *ArrayMetaSlab) Remove(index uint32) error {
 	return nil
 }
 
+func (a *ArrayMetaSlab) Insert(index uint32, v Serializable) error {
+	startIndex := uint32(0)
+	for e := a.orderedHeaders.Front(); e != nil; e = e.Next() {
+		h := e.Value.(*ArraySlabHeader)
+		if index >= startIndex && index < startIndex+uint32(h.count) {
+			err := h.slab.Insert(index-startIndex, v)
+			if err != nil {
+				return err
+			}
+			if h.size > uint32(maxThreshold) {
+				a.split(e)
+			}
+			return nil
+		}
+		startIndex += uint32(h.count)
+	}
+	return nil
+}
+
+func (a *ArrayMetaSlab) Set(index uint32, v Serializable) error {
+	startIndex := uint32(0)
+	for e := a.orderedHeaders.Front(); e != nil; e = e.Next() {
+		h := e.Value.(*ArraySlabHeader)
+		if index >= startIndex && index < startIndex+uint32(h.count) {
+			err := h.slab.Set(index-startIndex, v)
+			if err != nil {
+				return err
+			}
+			if h.size > uint32(maxThreshold) {
+				a.split(e)
+			} else if h.size < minThreshold {
+				a.merge(e)
+			}
+			return nil
+		}
+		startIndex += uint32(h.count)
+	}
+	return nil
+}
+
 func (a *ArrayMetaSlab) merge(headerElement *list.Element) error {
 
 	if a.orderedHeaders.Len() == 1 {
@@ -430,7 +507,10 @@ func (a *ArrayMetaSlab) merge(headerElement *list.Element) error {
 func (a *ArrayMetaSlab) split(headerElement *list.Element) error {
 	header := headerElement.Value.(*ArraySlabHeader)
 
-	newSlab := header.slab.Split()
+	newSlab, err := header.slab.Split()
+	if err != nil {
+		return err
+	}
 	if newSlab == nil {
 		return nil
 	}

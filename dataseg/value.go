@@ -76,14 +76,14 @@ func (v *ArrayValue) Append(value Value) {
 	v.metaSlab.Append(value.GetSerizable())
 }
 
-func (v *ArrayValue) Remove(index uint32) {
-	v.metaSlab.Remove(index)
+func (v *ArrayValue) Remove(index uint32) error {
+	return v.metaSlab.Remove(index)
 }
 
-/*
-func (v *ArrayValue) Elements() []Value {
-	var v []Value
-	serizable := v.metaSlab.Get(index)
-	return serizable.GetValue()
+func (v *ArrayValue) Insert(index uint32, value Value) error {
+	return v.metaSlab.Insert(index, value.GetSerizable())
 }
-*/
+
+func (v *ArrayValue) Set(index uint32, value Value) error {
+	return v.metaSlab.Set(index, value.GetSerizable())
+}

@@ -1,7 +1,7 @@
 package main
 
 type Segmentable interface {
-	Split() (Segmentable, Segmentable, error)
+	Split() (Segmentable, error)
 	Merge(Segmentable) error
 	ByteSize() uint32
 }

@@ -1,12 +1,5 @@
 package main
 
-var counter int = 0
-
-func generateUUID() StorageID {
-	counter++
-	return StorageID(counter)
-}
-
 var storageIDCounter uint32 = 0
 
 func generateStorageID() StorageID {

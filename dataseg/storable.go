@@ -13,6 +13,7 @@ type Serializable interface {
 	Decode([]byte) error
 	ByteSize() uint32
 
+	IsConstantSized() bool
 	GetValue() Value
 }
 
@@ -28,6 +29,8 @@ type Storage interface {
 }
 
 const (
+	cborTagStorageID = 255
+
 	cborTagUInt32Value = 163
 )
 
@@ -77,6 +80,8 @@ func (s *UInt32Serializable) ByteSize() uint32 {
 	return 7
 }
 
+func (s *UInt32Serializable) IsConstantSized() bool { return true }
+
 func (s *UInt32Serializable) GetValue() Value {
 	return s.v
 }
@@ -96,4 +101,47 @@ func decodeSerializable(data []byte) (Serializable, []byte, error) {
 	}
 
 	return nil, nil, errors.New("not supported serializable format")
+}
+
+// Encode encodes UInt32Value as
+// cbor.Tag{
+//		Number:  cborTagStorageID,
+//		Content: uint32,
+// }
+func (s *StorageID) Encode() ([]byte, error) {
+	buf := make([]byte, s.ByteSize())
+
+	buf[0] = 0xd8
+	buf[1] = cborTagStorageID
+	buf[2] = 0 | byte(26)
+	binary.BigEndian.PutUint32(buf[3:], uint32(*s))
+
+	return buf, nil
+}
+
+func (s *StorageID) Decode(b []byte) error {
+	if uint32(len(b)) < s.ByteSize() {
+		return errors.New("too short for StorageID type")
+	}
+
+	if !bytes.Equal([]byte{0xd8, cborTagStorageID, 26}, b[:3]) {
+		return errors.New("not StorageD type")
+	}
+
+	*s = StorageID(binary.BigEndian.Uint32(b[3:]))
+	return nil
+}
+
+func (s *StorageID) ByteSize() uint32 {
+	// tag number (2 bytes) + content content (5 bytes)
+	return 7
+}
+
+func (s *StorageID) IsConstantSized() bool {
+	return true
+}
+
+// TODO:
+func (s *StorageID) GetValue() Value {
+	return nil
 }
