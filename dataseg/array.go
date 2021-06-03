@@ -451,6 +451,7 @@ func (a *ArrayMetaSlab) Print() {
 			fmt.Printf("%[1]v (%[1]T), ", e.GetValue())
 		}
 		fmt.Printf("]\n")
+		i++
 	}
 	fmt.Println("==========================================")
 }
